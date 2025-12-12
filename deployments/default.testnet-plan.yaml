@@ -1,0 +1,32 @@
+---
+id: 0
+name: Testnet deployment
+network: testnet
+stacks-node: "https://api.testnet.hiro.so"
+bitcoin-node: "http://blockstack:blockstacksystem@bitcoind.testnet.stacks.co:18332"
+plan:
+  batches:
+    - id: 0
+      transactions:
+        - contract-publish:
+            contract-name: bridge-registry
+            expected-sender: ST1HTBVD3JG9C05J7HBJTHGR0GGW7KXW28M5JS8QE
+            cost: 1838631
+            path: contracts/bridge-registry.clar
+            anchor-block-only: true
+            clarity-version: 4
+        - contract-publish:
+            contract-name: intent-bridge
+            expected-sender: ST1HTBVD3JG9C05J7HBJTHGR0GGW7KXW28M5JS8QE
+            cost: 1837642
+            path: contracts/intent-bridge.clar
+            anchor-block-only: true
+            clarity-version: 4
+        - contract-publish:
+            contract-name: intent-executor
+            expected-sender: ST1HTBVD3JG9C05J7HBJTHGR0GGW7KXW28M5JS8QE
+            cost: 1839290
+            path: contracts/intent-executor.clar
+            anchor-block-only: true
+            clarity-version: 4
+      epoch: "3.3"

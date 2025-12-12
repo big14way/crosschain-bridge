@@ -1,0 +1,31 @@
+[project]
+name = "crosschain-bridge"
+description = "Cross-chain intent bridge with contract verification using Clarity 4"
+authors = ["Builder"]
+telemetry = false
+cache_dir = "./.cache"
+requirements = []
+
+[contracts.intent-bridge]
+path = "contracts/intent-bridge.clar"
+clarity_version = 4
+epoch = 3.3
+
+[contracts.bridge-registry]
+path = "contracts/bridge-registry.clar"
+clarity_version = 4
+epoch = 3.3
+
+[contracts.intent-executor]
+path = "contracts/intent-executor.clar"
+clarity_version = 4
+epoch = 3.3
+
+[repl.analysis]
+passes = ["check_checker"]
+
+[repl.analysis.check_checker]
+strict = false
+trusted_sender = false
+trusted_caller = false
+callee_filter = false

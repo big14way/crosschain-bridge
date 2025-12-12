@@ -1,0 +1,23 @@
+;; Test commands for deployed contracts on testnet
+;; Run these in Clarinet console connected to testnet
+
+;; 1. Get protocol stats
+(contract-call? 'ST1HTBVD3JG9C05J7HBJTHGR0GGW7KXW28M5JS8QE.intent-bridge get-protocol-stats)
+
+;; 2. Get current time (Clarity 4 stacks-block-time)
+(contract-call? 'ST1HTBVD3JG9C05J7HBJTHGR0GGW7KXW28M5JS8QE.intent-bridge get-current-time)
+
+;; 3. Get registry stats
+(contract-call? 'ST1HTBVD3JG9C05J7HBJTHGR0GGW7KXW28M5JS8QE.bridge-registry get-registry-stats)
+
+;; 4. Generate cross-chain payload (tests to-ascii?)
+(contract-call? 'ST1HTBVD3JG9C05J7HBJTHGR0GGW7KXW28M5JS8QE.intent-bridge generate-cross-chain-payload u1 u1 u2 u1000000)
+
+;; 5. Generate intent message (tests to-ascii?)
+(contract-call? 'ST1HTBVD3JG9C05J7HBJTHGR0GGW7KXW28M5JS8QE.intent-bridge generate-intent-message u1)
+
+;; 6. Check solver (should be none)
+(contract-call? 'ST1HTBVD3JG9C05J7HBJTHGR0GGW7KXW28M5JS8QE.intent-bridge get-solver tx-sender)
+
+;; 7. Get chain name (should be "Unknown" before initialization)
+(contract-call? 'ST1HTBVD3JG9C05J7HBJTHGR0GGW7KXW28M5JS8QE.bridge-registry get-chain-name u1)

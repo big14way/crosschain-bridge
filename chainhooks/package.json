@@ -1,0 +1,30 @@
+{
+  "name": "crosschain-bridge-chainhooks",
+  "version": "1.0.0",
+  "description": "Chainhooks event observer for Cross-chain Intent Bridge tracking intents, fills, and fees",
+  "main": "index.js",
+  "type": "module",
+  "scripts": {
+    "start": "node index.js",
+    "dev": "nodemon index.js",
+    "test": "node test.js"
+  },
+  "keywords": [
+    "chainhooks",
+    "stacks",
+    "bridge",
+    "crosschain",
+    "intent",
+    "analytics"
+  ],
+  "author": "",
+  "license": "MIT",
+  "dependencies": {
+    "@hirosystems/chainhook-client": "^1.8.0",
+    "express": "^4.18.2",
+    "dotenv": "^16.3.1"
+  },
+  "devDependencies": {
+    "nodemon": "^3.0.1"
+  }
+}

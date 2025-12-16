@@ -256,6 +256,72 @@ This format is:
 - Proof submission requires oracle/relayer for destination chain
 - Consider running your own solver for guaranteed execution
 
+## Hiro Chainhooks Integration
+
+This project includes a **Hiro Chainhooks** implementation for real-time monitoring of cross-chain bridge activity, solver performance, and intent fulfillment metrics.
+
+### Features
+
+✅ **Real-time Intent Tracking**: Monitor intent creation, fills, confirmations, and cancellations
+✅ **Solver Analytics**: Track solver registrations, collateral levels, and performance metrics
+✅ **Bridge Fee Monitoring**: Monitor fees and collateral requirements across all chains
+✅ **Volume Metrics**: Track cross-chain transfer volumes and route popularity
+✅ **Reorg-Resistant**: Chainhook's built-in protection against blockchain reorganizations
+
+### Tracked Events
+
+| Event | Contract Function | Data Collected |
+|-------|------------------|----------------|
+| Intent Created | `create-intent` | Source asset, destination chain, amounts, expiry |
+| Intent Filled | `fill-intent` | Solver, collateral locked, fill timestamp |
+| Fill Confirmed | `confirm-fill` | Proof submitted, tokens released |
+| Intent Cancelled | `cancel-intent` | Cancellation reason, refunded amount |
+| Solver Registered | `register-solver` | Solver address, initial collateral |
+| Collateral Added | `add-collateral` | Solver, amount added |
+| Bridge Registered | `register-bridge` | Bridge contract, supported chains, fees |
+
+### Analytics Output
+
+The Chainhooks observer generates real-time analytics:
+
+```json
+{
+  "uniqueUsers": 128,
+  "totalIntents": 456,
+  "fulfilledIntents": 398,
+  "cancelledIntents": 43,
+  "expiredIntents": 15,
+  "totalVolume": 5000000000,
+  "activeSolvers": 23,
+  "totalCollateral": 150000000000,
+  "averageFillTime": 180,
+  "intents": [...],
+  "solvers": [...],
+  "timestamp": "2025-12-16T10:30:00.000Z"
+}
+```
+
+### Quick Start
+
+```bash
+cd chainhooks
+npm install
+cp .env.example .env
+# Edit .env with your configuration
+npm start
+```
+
+For detailed setup and configuration, see [chainhooks/README.md](./chainhooks/README.md).
+
+### Use Cases
+
+- **Solver Dashboard**: Real-time monitoring of intent opportunities and solver performance
+- **Bridge Analytics**: Track cross-chain volume, popular routes, and fee revenue
+- **User Experience**: Monitor fill times and success rates for UX optimization
+- **Compliance Monitoring**: Track all cross-chain transfers for regulatory reporting
+- **Arbitrage Detection**: Identify profitable intents based on rate spreads
+- **Risk Management**: Monitor collateral ratios and solver health metrics
+
 ## License
 
 MIT License

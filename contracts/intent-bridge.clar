@@ -10,6 +10,7 @@
 (define-constant ERR_INVALID_AMOUNT (err u9005))
 (define-constant ERR_UNVERIFIED_BRIDGE (err u9006))
 (define-constant ERR_INSUFFICIENT_COLLATERAL (err u9008))
+(define-constant ERR_CONTRACT_PAUSED (err u9009))
 
 (define-constant INTENT_PENDING u0)
 (define-constant INTENT_FILLED u1)
@@ -22,6 +23,7 @@
 (define-data-var protocol-fee-bps uint u30)
 (define-data-var min-collateral-ratio uint u150)
 (define-data-var contract-vault principal tx-sender)
+(define-data-var contract-paused bool false)
 
 (define-map intents uint {
     creator: principal, source-chain: uint, dest-chain: uint,
@@ -107,6 +109,12 @@
         (var-set protocol-fee-bps new-fee-bps)
         (ok true)))
 
+(define-public (toggle-contract-pause)
+    (begin
+        (asserts! (is-eq tx-sender CONTRACT_OWNER) ERR_NOT_AUTHORIZED)
+        (var-set contract-paused (not (var-get contract-paused)))
+        (ok (var-get contract-paused))))
+
 (define-public (register-solver (collateral uint))
     (begin
         (asserts! (> collateral u0) ERR_INVALID_AMOUNT)
@@ -126,6 +134,7 @@
     (let ((intent-id (+ (var-get intent-counter) u1))
           (expiry (+ stacks-block-time expiry-duration))
           (intent-hash (calculate-intent-hash tx-sender CHAIN_STACKS dest-chain source-amount dest-amount intent-id)))
+        (asserts! (not (var-get contract-paused)) ERR_CONTRACT_PAUSED)
         (asserts! (> source-amount u0) ERR_INVALID_AMOUNT)
         (asserts! (> expiry-duration u3600) ERR_INVALID_AMOUNT)
         (try! (contract-call? source-asset transfer source-amount tx-sender (var-get contract-vault) none))

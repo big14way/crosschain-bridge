@@ -168,3 +168,16 @@
         (try! (contract-call? token transfer (get source-amount intent) (var-get contract-vault) tx-sender none))
         (map-set intents intent-id (merge intent { status: INTENT_CANCELLED }))
         (ok true)))
+
+(define-read-only (get-solver-stats (solver principal))
+    (match (map-get? solvers solver)
+        solver-data {
+            collateral: (get collateral solver-data),
+            total-filled: (get total-filled solver-data),
+            successful-fills: (get successful-fills solver-data),
+            reputation-score: (get reputation-score solver-data),
+            success-rate: (if (> (get total-filled solver-data) u0)
+                (/ (* (get successful-fills solver-data) u100) (get total-filled solver-data))
+                u0)
+        }
+        { collateral: u0, total-filled: u0, successful-fills: u0, reputation-score: u0, success-rate: u0 }))

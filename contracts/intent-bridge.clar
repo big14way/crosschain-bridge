@@ -19,6 +19,8 @@
 (define-constant INTENT_CANCELLED u2)
 (define-constant CHAIN_STACKS u1)
 (define-constant CHAIN_BITCOIN u2)
+(define-constant CHAIN_ETHEREUM u3)
+(define-constant CHAIN_POLYGON u4)
 
 (define-data-var intent-counter uint u0)
 (define-data-var total-volume uint u0)
@@ -27,6 +29,8 @@
 (define-data-var contract-vault principal tx-sender)
 (define-data-var contract-paused bool false)
 (define-data-var withdrawal-cooldown uint u86400)
+
+(define-map chain-volume uint uint)
 
 (define-map intents uint {
     creator: principal, source-chain: uint, dest-chain: uint,
@@ -99,6 +103,17 @@
     { total-intents: (var-get intent-counter), total-volume: (var-get total-volume),
       fee-bps: (var-get protocol-fee-bps), min-collateral-ratio: (var-get min-collateral-ratio) })
 
+(define-read-only (get-chain-volume (target-chain uint))
+    (default-to u0 (map-get? chain-volume target-chain)))
+
+(define-read-only (get-all-chain-volumes)
+    {
+        stacks: (get-chain-volume CHAIN_STACKS),
+        bitcoin: (get-chain-volume CHAIN_BITCOIN),
+        ethereum: (get-chain-volume CHAIN_ETHEREUM),
+        polygon: (get-chain-volume CHAIN_POLYGON)
+    })
+
 (define-public (verify-bridge (bridge-contract principal) (name (string-ascii 64)))
     (let ((bridge-hash (unwrap! (contract-hash? bridge-contract) ERR_UNVERIFIED_BRIDGE)))
         (asserts! (is-eq tx-sender CONTRACT_OWNER) ERR_NOT_AUTHORIZED)
@@ -164,6 +179,8 @@
         (map-set solvers caller (merge solver { collateral: (- (get collateral solver) required-collateral) }))
         (map-set intents intent-id (merge intent { status: INTENT_FILLED, filled-by: (some caller) }))
         (var-set total-volume (+ (var-get total-volume) (get source-amount intent)))
+        (map-set chain-volume (get dest-chain intent)
+            (+ (default-to u0 (map-get? chain-volume (get dest-chain intent))) (get dest-amount intent)))
         (ok true)))
 
 (define-public (cancel-intent (intent-id uint) (token <ft-trait>))

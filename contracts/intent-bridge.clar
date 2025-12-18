@@ -11,6 +11,7 @@
 (define-constant ERR_UNVERIFIED_BRIDGE (err u9006))
 (define-constant ERR_INSUFFICIENT_COLLATERAL (err u9008))
 (define-constant ERR_CONTRACT_PAUSED (err u9009))
+(define-constant ERR_INVALID_EXTENSION (err u9010))
 
 (define-constant INTENT_PENDING u0)
 (define-constant INTENT_FILLED u1)
@@ -181,3 +182,12 @@
                 u0)
         }
         { collateral: u0, total-filled: u0, successful-fills: u0, reputation-score: u0, success-rate: u0 }))
+
+(define-public (extend-intent-expiry (intent-id uint) (extension-duration uint))
+    (let ((intent (unwrap! (map-get? intents intent-id) ERR_INTENT_NOT_FOUND)))
+        (asserts! (is-eq tx-sender (get creator intent)) ERR_NOT_AUTHORIZED)
+        (asserts! (is-eq (get status intent) INTENT_PENDING) ERR_INTENT_FILLED)
+        (asserts! (> extension-duration u0) ERR_INVALID_EXTENSION)
+        (asserts! (<= extension-duration u86400) ERR_INVALID_EXTENSION)
+        (map-set intents intent-id (merge intent { expiry: (+ (get expiry intent) extension-duration) }))
+        (ok true)))

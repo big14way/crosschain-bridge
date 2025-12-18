@@ -13,6 +13,8 @@
 (define-constant ERR_CONTRACT_PAUSED (err u9009))
 (define-constant ERR_INVALID_EXTENSION (err u9010))
 (define-constant ERR_WITHDRAWAL_COOLDOWN (err u9011))
+(define-constant ERR_REPUTATION_TOO_LOW (err u9012))
+(define-constant ERR_SLASH_AMOUNT_TOO_HIGH (err u9013))
 
 (define-constant INTENT_PENDING u0)
 (define-constant INTENT_FILLED u1)
@@ -29,6 +31,8 @@
 (define-data-var contract-vault principal tx-sender)
 (define-data-var contract-paused bool false)
 (define-data-var withdrawal-cooldown uint u86400)
+(define-data-var min-reputation-score uint u50)
+(define-data-var max-slash-percentage uint u50)
 
 (define-map chain-volume uint uint)
 
@@ -175,6 +179,7 @@
         (asserts! (is-eq (get status intent) INTENT_PENDING) ERR_INTENT_FILLED)
         (asserts! (< stacks-block-time (get expiry intent)) ERR_INTENT_EXPIRED)
         (asserts! (get active solver) ERR_NOT_AUTHORIZED)
+        (asserts! (>= (get reputation-score solver) (var-get min-reputation-score)) ERR_REPUTATION_TOO_LOW)
         (asserts! (>= (get collateral solver) required-collateral) ERR_INSUFFICIENT_COLLATERAL)
         (map-set solvers caller (merge solver { collateral: (- (get collateral solver) required-collateral) }))
         (map-set intents intent-id (merge intent { status: INTENT_FILLED, filled-by: (some caller) }))
@@ -224,3 +229,42 @@
             last-withdrawal: stacks-block-time
         }))
         (ok true)))
+
+(define-public (slash-solver-reputation (solver principal) (slash-percentage uint))
+    (let ((solver-data (unwrap! (map-get? solvers solver) ERR_NOT_AUTHORIZED))
+          (current-reputation (get reputation-score solver-data))
+          (max-slash (var-get max-slash-percentage)))
+        (asserts! (is-eq tx-sender CONTRACT_OWNER) ERR_NOT_AUTHORIZED)
+        (asserts! (<= slash-percentage max-slash) ERR_SLASH_AMOUNT_TOO_HIGH)
+        (asserts! (> slash-percentage u0) ERR_INVALID_AMOUNT)
+        (let ((slash-amount (/ (* current-reputation slash-percentage) u100))
+              (new-reputation (if (>= current-reputation slash-amount)
+                                (- current-reputation slash-amount)
+                                u0)))
+            (map-set solvers solver (merge solver-data {
+                reputation-score: new-reputation
+            }))
+            (ok {slashed: slash-amount, new-reputation: new-reputation}))))
+
+(define-public (restore-solver-reputation (solver principal) (restore-amount uint))
+    (let ((solver-data (unwrap! (map-get? solvers solver) ERR_NOT_AUTHORIZED))
+          (current-reputation (get reputation-score solver-data)))
+        (asserts! (is-eq tx-sender CONTRACT_OWNER) ERR_NOT_AUTHORIZED)
+        (asserts! (> restore-amount u0) ERR_INVALID_AMOUNT)
+        (asserts! (<= (+ current-reputation restore-amount) u100) ERR_INVALID_AMOUNT)
+        (map-set solvers solver (merge solver-data {
+            reputation-score: (+ current-reputation restore-amount)
+        }))
+        (ok true)))
+
+(define-read-only (can-solver-fill (solver principal))
+    (match (map-get? solvers solver)
+        solver-data (and (get active solver-data)
+                        (>= (get reputation-score solver-data) (var-get min-reputation-score)))
+        false))
+
+(define-read-only (get-reputation-threshold)
+    (var-get min-reputation-score))
+
+(define-read-only (get-max-slash-percentage)
+    (var-get max-slash-percentage))

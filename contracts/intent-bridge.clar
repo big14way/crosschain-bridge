@@ -12,6 +12,7 @@
 (define-constant ERR_INSUFFICIENT_COLLATERAL (err u9008))
 (define-constant ERR_CONTRACT_PAUSED (err u9009))
 (define-constant ERR_INVALID_EXTENSION (err u9010))
+(define-constant ERR_WITHDRAWAL_COOLDOWN (err u9011))
 
 (define-constant INTENT_PENDING u0)
 (define-constant INTENT_FILLED u1)
@@ -25,6 +26,7 @@
 (define-data-var min-collateral-ratio uint u150)
 (define-data-var contract-vault principal tx-sender)
 (define-data-var contract-paused bool false)
+(define-data-var withdrawal-cooldown uint u86400)
 
 (define-map intents uint {
     creator: principal, source-chain: uint, dest-chain: uint,
@@ -40,7 +42,8 @@
 
 (define-map solvers principal {
     collateral: uint, total-filled: uint, successful-fills: uint,
-    reputation-score: uint, registered-at: uint, active: bool
+    reputation-score: uint, registered-at: uint, active: bool,
+    last-withdrawal: uint
 })
 
 (define-trait ft-trait (
@@ -122,7 +125,8 @@
         (try! (stx-transfer? collateral tx-sender (var-get contract-vault)))
         (map-set solvers tx-sender {
             collateral: collateral, total-filled: u0, successful-fills: u0,
-            reputation-score: u100, registered-at: stacks-block-time, active: true })
+            reputation-score: u100, registered-at: stacks-block-time, active: true,
+            last-withdrawal: u0 })
         (ok true)))
 
 (define-public (add-collateral (amount uint))
@@ -190,4 +194,16 @@
         (asserts! (> extension-duration u0) ERR_INVALID_EXTENSION)
         (asserts! (<= extension-duration u86400) ERR_INVALID_EXTENSION)
         (map-set intents intent-id (merge intent { expiry: (+ (get expiry intent) extension-duration) }))
+        (ok true)))
+
+(define-public (withdraw-collateral (amount uint))
+    (let ((solver (unwrap! (map-get? solvers tx-sender) ERR_NOT_AUTHORIZED)))
+        (asserts! (> amount u0) ERR_INVALID_AMOUNT)
+        (asserts! (<= amount (get collateral solver)) ERR_INSUFFICIENT_COLLATERAL)
+        (asserts! (>= (- stacks-block-time (get last-withdrawal solver)) (var-get withdrawal-cooldown)) ERR_WITHDRAWAL_COOLDOWN)
+        (try! (stx-transfer? amount (var-get contract-vault) tx-sender))
+        (map-set solvers tx-sender (merge solver {
+            collateral: (- (get collateral solver) amount),
+            last-withdrawal: stacks-block-time
+        }))
         (ok true)))

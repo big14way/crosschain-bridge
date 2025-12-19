@@ -15,6 +15,8 @@
 (define-constant ERR_WITHDRAWAL_COOLDOWN (err u9011))
 (define-constant ERR_REPUTATION_TOO_LOW (err u9012))
 (define-constant ERR_SLASH_AMOUNT_TOO_HIGH (err u9013))
+(define-constant ERR_WITHDRAWAL_NOT_READY (err u9014))
+(define-constant ERR_WITHDRAWAL_CANCELLED (err u9015))
 
 (define-constant INTENT_PENDING u0)
 (define-constant INTENT_FILLED u1)
@@ -33,6 +35,8 @@
 (define-data-var withdrawal-cooldown uint u86400)
 (define-data-var min-reputation-score uint u50)
 (define-data-var max-slash-percentage uint u50)
+(define-data-var scheduled-withdrawal-counter uint u0)
+(define-data-var min-withdrawal-delay uint u86400)
 
 (define-map chain-volume uint uint)
 
@@ -52,6 +56,15 @@
     collateral: uint, total-filled: uint, successful-fills: uint,
     reputation-score: uint, registered-at: uint, active: bool,
     last-withdrawal: uint
+})
+
+(define-map scheduled-withdrawals uint {
+    solver: principal,
+    amount: uint,
+    scheduled-at: uint,
+    execute-after: uint,
+    executed: bool,
+    cancelled: bool
 })
 
 (define-trait ft-trait (
@@ -216,6 +229,50 @@
         (asserts! (> extension-duration u0) ERR_INVALID_EXTENSION)
         (asserts! (<= extension-duration u86400) ERR_INVALID_EXTENSION)
         (map-set intents intent-id (merge intent { expiry: (+ (get expiry intent) extension-duration) }))
+        (ok true)))
+
+(define-public (schedule-withdrawal (amount uint))
+    (let ((solver (unwrap! (map-get? solvers tx-sender) ERR_NOT_AUTHORIZED))
+          (withdrawal-id (+ (var-get scheduled-withdrawal-counter) u1))
+          (execute-after (+ stacks-block-time (var-get min-withdrawal-delay))))
+        (asserts! (> amount u0) ERR_INVALID_AMOUNT)
+        (asserts! (<= amount (get collateral solver)) ERR_INSUFFICIENT_COLLATERAL)
+        (map-set scheduled-withdrawals withdrawal-id {
+            solver: tx-sender,
+            amount: amount,
+            scheduled-at: stacks-block-time,
+            execute-after: execute-after,
+            executed: false,
+            cancelled: false
+        })
+        (var-set scheduled-withdrawal-counter withdrawal-id)
+        (print { event: "withdrawal-scheduled", withdrawal-id: withdrawal-id, solver: tx-sender, amount: amount, execute-after: execute-after, timestamp: stacks-block-time })
+        (ok withdrawal-id)))
+
+(define-public (execute-scheduled-withdrawal (withdrawal-id uint))
+    (let ((withdrawal (unwrap! (map-get? scheduled-withdrawals withdrawal-id) ERR_NOT_AUTHORIZED))
+          (solver (unwrap! (map-get? solvers (get solver withdrawal)) ERR_NOT_AUTHORIZED)))
+        (asserts! (is-eq tx-sender (get solver withdrawal)) ERR_NOT_AUTHORIZED)
+        (asserts! (not (get executed withdrawal)) ERR_NOT_AUTHORIZED)
+        (asserts! (not (get cancelled withdrawal)) ERR_WITHDRAWAL_CANCELLED)
+        (asserts! (>= stacks-block-time (get execute-after withdrawal)) ERR_WITHDRAWAL_NOT_READY)
+        (asserts! (<= (get amount withdrawal) (get collateral solver)) ERR_INSUFFICIENT_COLLATERAL)
+        (try! (stx-transfer? (get amount withdrawal) (var-get contract-vault) tx-sender))
+        (map-set solvers tx-sender (merge solver {
+            collateral: (- (get collateral solver) (get amount withdrawal)),
+            last-withdrawal: stacks-block-time
+        }))
+        (map-set scheduled-withdrawals withdrawal-id (merge withdrawal { executed: true }))
+        (print { event: "withdrawal-executed", withdrawal-id: withdrawal-id, solver: tx-sender, amount: (get amount withdrawal), timestamp: stacks-block-time })
+        (ok true)))
+
+(define-public (cancel-scheduled-withdrawal (withdrawal-id uint))
+    (let ((withdrawal (unwrap! (map-get? scheduled-withdrawals withdrawal-id) ERR_NOT_AUTHORIZED)))
+        (asserts! (is-eq tx-sender (get solver withdrawal)) ERR_NOT_AUTHORIZED)
+        (asserts! (not (get executed withdrawal)) ERR_NOT_AUTHORIZED)
+        (asserts! (not (get cancelled withdrawal)) ERR_WITHDRAWAL_CANCELLED)
+        (map-set scheduled-withdrawals withdrawal-id (merge withdrawal { cancelled: true }))
+        (print { event: "withdrawal-cancelled", withdrawal-id: withdrawal-id, solver: tx-sender, timestamp: stacks-block-time })
         (ok true)))
 
 (define-public (withdraw-collateral (amount uint))

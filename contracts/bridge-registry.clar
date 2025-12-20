@@ -12,6 +12,8 @@
 (define-constant ERR_BRIDGE_EXISTS (err u10003))
 (define-constant ERR_INVALID_CHAIN (err u10004))
 (define-constant ERR_INVALID_PERFORMANCE (err u10005))
+(define-constant ERR_INSUFFICIENT_POINTS (err u10006))
+(define-constant ERR_INVALID_REDEMPTION (err u10007))
 
 ;; Chain identifiers
 (define-constant CHAIN_STACKS u1)
@@ -90,6 +92,36 @@
 )
 
 (define-data-var transaction-counter uint u0)
+
+;; Reward system configuration
+(define-data-var reward-points-per-transaction uint u10)
+(define-data-var points-to-discount-rate uint u100) ;; 100 points = 1 bps discount
+(define-data-var max-discount-bps uint u500) ;; Max 5% discount
+(define-data-var redemption-counter uint u0)
+
+;; ========================================
+;; Reward System Maps
+;; ========================================
+
+;; User reward points balance
+(define-map user-reward-points principal uint)
+
+;; Points redemption history
+(define-map points-redemption-history
+    { user: principal, redemption-id: uint }
+    {
+        points-used: uint,
+        discount-earned: uint,
+        redeemed-at: uint,
+        bridge-id: uint
+    }
+)
+
+;; Track total points earned per user
+(define-map user-points-earned principal uint)
+
+;; Track total points redeemed per user
+(define-map user-points-redeemed principal uint)
 
 ;; ========================================
 ;; Read-Only Functions
@@ -219,6 +251,55 @@
             (/ success-rate u100)  ;; Convert from bps to percentage
         )
     )
+)
+
+;; ========================================
+;; Reward System Read-Only Functions
+;; ========================================
+
+;; Get user's current reward points balance
+(define-read-only (get-user-points (user principal))
+    (default-to u0 (map-get? user-reward-points user))
+)
+
+;; Get total points earned by user
+(define-read-only (get-user-points-earned (user principal))
+    (default-to u0 (map-get? user-points-earned user))
+)
+
+;; Get total points redeemed by user
+(define-read-only (get-user-points-redeemed (user principal))
+    (default-to u0 (map-get? user-points-redeemed user))
+)
+
+;; Calculate discount available for given points
+(define-read-only (calculate-discount (points uint))
+    (let
+        (
+            (rate (var-get points-to-discount-rate))
+            (max-discount (var-get max-discount-bps))
+            (calculated-discount (/ points rate))
+        )
+        (if (> calculated-discount max-discount)
+            max-discount
+            calculated-discount
+        )
+    )
+)
+
+;; Get redemption history entry
+(define-read-only (get-redemption-history (user principal) (redemption-id uint))
+    (map-get? points-redemption-history { user: user, redemption-id: redemption-id })
+)
+
+;; Get user's reward statistics
+(define-read-only (get-user-reward-stats (user principal))
+    {
+        current-balance: (get-user-points user),
+        total-earned: (get-user-points-earned user),
+        total-redeemed: (get-user-points-redeemed user),
+        available-discount-bps: (calculate-discount (get-user-points user))
+    }
 )
 
 ;; ========================================
@@ -446,6 +527,124 @@
         (print {
             event: "bridge-performance-reset",
             bridge-id: bridge-id,
+            timestamp: stacks-block-time
+        })
+
+        (ok true)
+    )
+)
+
+;; ========================================
+;; Reward System Public Functions
+;; ========================================
+
+;; Award points to user for successful bridge transaction
+(define-public (award-reward-points (user principal) (bridge-id uint))
+    (let
+        (
+            (bridge (unwrap! (map-get? bridges bridge-id) ERR_BRIDGE_NOT_FOUND))
+            (current-balance (get-user-points user))
+            (total-earned (get-user-points-earned user))
+            (points-per-tx (var-get reward-points-per-transaction))
+            (reliability (get-reliability-score bridge-id))
+        )
+        ;; Verify bridge exists and is active
+        (asserts! (get active bridge) ERR_BRIDGE_NOT_FOUND)
+
+        ;; Only award points for bridges with good reliability (>= 80%)
+        (asserts! (>= reliability u80) ERR_INVALID_PERFORMANCE)
+
+        ;; Update user's points balance
+        (map-set user-reward-points user (+ current-balance points-per-tx))
+
+        ;; Update total earned tracking
+        (map-set user-points-earned user (+ total-earned points-per-tx))
+
+        ;; Emit event for Chainhook
+        (print {
+            event: "reward-points-awarded",
+            user: user,
+            bridge-id: bridge-id,
+            points-awarded: points-per-tx,
+            new-balance: (+ current-balance points-per-tx),
+            total-earned: (+ total-earned points-per-tx),
+            timestamp: stacks-block-time
+        })
+
+        (ok points-per-tx)
+    )
+)
+
+;; Redeem points for fee discount
+(define-public (redeem-points-for-discount (points uint) (bridge-id uint))
+    (let
+        (
+            (user tx-sender)
+            (current-balance (get-user-points user))
+            (total-redeemed (get-user-points-redeemed user))
+            (discount-bps (calculate-discount points))
+            (redemption-id (var-get redemption-counter))
+        )
+        ;; Verify user has sufficient points
+        (asserts! (>= current-balance points) ERR_INSUFFICIENT_POINTS)
+
+        ;; Verify points amount is valid (must be positive and result in discount)
+        (asserts! (and (> points u0) (> discount-bps u0)) ERR_INVALID_REDEMPTION)
+
+        ;; Update user's points balance
+        (map-set user-reward-points user (- current-balance points))
+
+        ;; Update total redeemed tracking
+        (map-set user-points-redeemed user (+ total-redeemed points))
+
+        ;; Record redemption in history
+        (map-set points-redemption-history
+            { user: user, redemption-id: redemption-id }
+            {
+                points-used: points,
+                discount-earned: discount-bps,
+                redeemed-at: stacks-block-time,
+                bridge-id: bridge-id
+            }
+        )
+
+        ;; Increment redemption counter
+        (var-set redemption-counter (+ redemption-id u1))
+
+        ;; Emit event for Chainhook
+        (print {
+            event: "reward-points-redeemed",
+            user: user,
+            redemption-id: redemption-id,
+            points-redeemed: points,
+            discount-earned-bps: discount-bps,
+            new-balance: (- current-balance points),
+            total-redeemed: (+ total-redeemed points),
+            bridge-id: bridge-id,
+            timestamp: stacks-block-time
+        })
+
+        (ok { redemption-id: redemption-id, discount-bps: discount-bps })
+    )
+)
+
+;; Admin: Update reward configuration
+(define-public (set-reward-config (points-per-tx uint) (points-to-discount uint) (max-discount uint))
+    (begin
+        (asserts! (is-eq tx-sender CONTRACT_OWNER) ERR_NOT_AUTHORIZED)
+        (asserts! (> points-per-tx u0) ERR_INVALID_PERFORMANCE)
+        (asserts! (> points-to-discount u0) ERR_INVALID_PERFORMANCE)
+        (asserts! (<= max-discount u10000) ERR_INVALID_PERFORMANCE)
+
+        (var-set reward-points-per-transaction points-per-tx)
+        (var-set points-to-discount-rate points-to-discount)
+        (var-set max-discount-bps max-discount)
+
+        (print {
+            event: "reward-config-updated",
+            points-per-tx: points-per-tx,
+            points-to-discount: points-to-discount,
+            max-discount: max-discount,
             timestamp: stacks-block-time
         })
 

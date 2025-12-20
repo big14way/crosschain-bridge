@@ -11,6 +11,7 @@
 (define-constant ERR_BRIDGE_NOT_FOUND (err u10002))
 (define-constant ERR_BRIDGE_EXISTS (err u10003))
 (define-constant ERR_INVALID_CHAIN (err u10004))
+(define-constant ERR_INVALID_PERFORMANCE (err u10005))
 
 ;; Chain identifiers
 (define-constant CHAIN_STACKS u1)
@@ -65,6 +66,30 @@
     { source: uint, dest: uint }
     (list 5 uint)
 )
+
+;; Bridge performance tracking
+(define-map bridge-performance
+    uint
+    {
+        total-transactions: uint,
+        successful-transactions: uint,
+        failed-transactions: uint,
+        total-processing-time: uint,
+        last-updated: uint
+    }
+)
+
+;; Individual transaction records for detailed tracking
+(define-map transaction-records
+    { bridge-id: uint, tx-index: uint }
+    {
+        success: bool,
+        processing-time: uint,
+        recorded-at: uint
+    }
+)
+
+(define-data-var transaction-counter uint u0)
 
 ;; ========================================
 ;; Read-Only Functions
@@ -143,6 +168,57 @@
         total-verified: (var-get total-verified),
         current-time: stacks-block-time
     }
+)
+
+;; Get bridge performance metrics
+(define-read-only (get-bridge-performance (bridge-id uint))
+    (default-to
+        { total-transactions: u0, successful-transactions: u0, failed-transactions: u0, total-processing-time: u0, last-updated: u0 }
+        (map-get? bridge-performance bridge-id)
+    )
+)
+
+;; Calculate success rate (in basis points, 10000 = 100%)
+(define-read-only (get-success-rate (bridge-id uint))
+    (let
+        (
+            (perf (get-bridge-performance bridge-id))
+            (total (get total-transactions perf))
+        )
+        (if (is-eq total u0)
+            u0
+            (/ (* (get successful-transactions perf) u10000) total)
+        )
+    )
+)
+
+;; Calculate average processing time
+(define-read-only (get-average-processing-time (bridge-id uint))
+    (let
+        (
+            (perf (get-bridge-performance bridge-id))
+            (total (get total-transactions perf))
+        )
+        (if (is-eq total u0)
+            u0
+            (/ (get total-processing-time perf) total)
+        )
+    )
+)
+
+;; Get bridge reliability score (0-100)
+(define-read-only (get-reliability-score (bridge-id uint))
+    (let
+        (
+            (success-rate (get-success-rate bridge-id))
+            (perf (get-bridge-performance bridge-id))
+        )
+        ;; Score based on success rate, higher if more transactions
+        (if (< (get total-transactions perf) u10)
+            u0  ;; Not enough data
+            (/ success-rate u100)  ;; Convert from bps to percentage
+        )
+    )
 )
 
 ;; ========================================
@@ -293,5 +369,86 @@
                 ERR_NOT_AUTHORIZED
             )
         )
+    )
+)
+
+;; ========================================
+;; Performance Tracking Functions
+;; ========================================
+
+;; Record transaction outcome
+(define-public (record-transaction-outcome (bridge-id uint) (success bool) (processing-time uint))
+    (let
+        (
+            (bridge (unwrap! (map-get? bridges bridge-id) ERR_BRIDGE_NOT_FOUND))
+            (perf (get-bridge-performance bridge-id))
+            (tx-index (var-get transaction-counter))
+            (current-time stacks-block-time)
+        )
+        ;; Verify bridge exists and is active
+        (asserts! (get active bridge) ERR_BRIDGE_NOT_FOUND)
+        (asserts! (> processing-time u0) ERR_INVALID_PERFORMANCE)
+
+        ;; Record individual transaction
+        (map-set transaction-records
+            { bridge-id: bridge-id, tx-index: tx-index }
+            {
+                success: success,
+                processing-time: processing-time,
+                recorded-at: current-time
+            }
+        )
+
+        ;; Update performance metrics
+        (map-set bridge-performance bridge-id {
+            total-transactions: (+ (get total-transactions perf) u1),
+            successful-transactions: (if success (+ (get successful-transactions perf) u1) (get successful-transactions perf)),
+            failed-transactions: (if success (get failed-transactions perf) (+ (get failed-transactions perf) u1)),
+            total-processing-time: (+ (get total-processing-time perf) processing-time),
+            last-updated: current-time
+        })
+
+        (var-set transaction-counter (+ tx-index u1))
+
+        ;; Emit event for Chainhook
+        (print {
+            event: "transaction-outcome-recorded",
+            bridge-id: bridge-id,
+            tx-index: tx-index,
+            success: success,
+            processing-time: processing-time,
+            success-rate: (get-success-rate bridge-id),
+            avg-processing-time: (get-average-processing-time bridge-id),
+            reliability-score: (get-reliability-score bridge-id),
+            timestamp: current-time
+        })
+
+        (ok tx-index)
+    )
+)
+
+;; Reset bridge performance metrics (admin only)
+(define-public (reset-bridge-performance (bridge-id uint))
+    (let
+        (
+            (bridge (unwrap! (map-get? bridges bridge-id) ERR_BRIDGE_NOT_FOUND))
+        )
+        (asserts! (is-eq tx-sender CONTRACT_OWNER) ERR_NOT_AUTHORIZED)
+
+        (map-set bridge-performance bridge-id {
+            total-transactions: u0,
+            successful-transactions: u0,
+            failed-transactions: u0,
+            total-processing-time: u0,
+            last-updated: stacks-block-time
+        })
+
+        (print {
+            event: "bridge-performance-reset",
+            bridge-id: bridge-id,
+            timestamp: stacks-block-time
+        })
+
+        (ok true)
     )
 )

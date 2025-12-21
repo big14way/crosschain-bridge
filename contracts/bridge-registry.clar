@@ -18,6 +18,12 @@
 (define-constant ERR_INSUFFICIENT_LIQUIDITY (err u10009))
 (define-constant ERR_POOL_EXISTS (err u10010))
 (define-constant ERR_INVALID_DEPOSIT (err u10011))
+(define-constant ERR_INSURANCE_NOT_FOUND (err u10012))
+(define-constant ERR_INSURANCE_EXISTS (err u10013))
+(define-constant ERR_INVALID_COVERAGE (err u10014))
+(define-constant ERR_CLAIM_NOT_FOUND (err u10015))
+(define-constant ERR_CLAIM_ALREADY_PROCESSED (err u10016))
+(define-constant ERR_INSUFFICIENT_POOL (err u10017))
 
 ;; Chain identifiers
 (define-constant CHAIN_STACKS u1)
@@ -173,6 +179,63 @@
 )
 
 (define-data-var liquidity-event-counter uint u0)
+
+;; ========================================
+;; Bridge Insurance System
+;; ========================================
+
+(define-data-var insurance-counter uint u0)
+(define-data-var insurance-pool-balance uint u0)
+(define-data-var claim-counter uint u0)
+(define-data-var base-premium-bps uint u50) ;; 0.5% base premium
+(define-data-var coverage-to-premium-ratio uint u100) ;; 100:1 ratio
+
+;; Insurance policies for bridge transactions
+(define-map insurance-policies
+    { user: principal, policy-id: uint }
+    {
+        bridge-id: uint,
+        coverage-amount: uint,
+        premium-paid: uint,
+        purchased-at: uint,
+        expires-at: uint,
+        active: bool,
+        claimed: bool
+    }
+)
+
+;; User's active policies by bridge
+(define-map user-active-policies
+    { user: principal, bridge-id: uint }
+    (list 10 uint)
+)
+
+;; Insurance claims
+(define-map insurance-claims
+    uint
+    {
+        policy-id: uint,
+        user: principal,
+        bridge-id: uint,
+        claim-amount: uint,
+        filed-at: uint,
+        processed-at: uint,
+        approved: bool,
+        processed: bool,
+        payout-amount: uint
+    }
+)
+
+;; Bridge risk ratings (affects premiums)
+(define-map bridge-risk-ratings
+    uint
+    {
+        risk-score: uint, ;; 0-100, higher = riskier
+        total-claims: uint,
+        total-payouts: uint,
+        last-updated: uint
+    }
+)
 
 ;; ========================================
 ;; Read-Only Functions
@@ -437,6 +500,69 @@
             deposited-at: u0,
             last-claim-at: u0
         })
+)
+
+;; ========================================
+;; Insurance Read-Only Functions
+;; ========================================
+
+;; Get insurance policy
+(define-read-only (get-insurance-policy (user principal) (policy-id uint))
+    (map-get? insurance-policies { user: user, policy-id: policy-id })
+)
+
+;; Get user's active policies for a bridge
+(define-read-only (get-user-active-policies (user principal) (bridge-id uint))
+    (default-to (list) (map-get? user-active-policies { user: user, bridge-id: bridge-id }))
+)
+
+;; Get insurance claim
+(define-read-only (get-insurance-claim (claim-id uint))
+    (map-get? insurance-claims claim-id)
+)
+
+;; Get bridge risk rating
+(define-read-only (get-bridge-risk-rating (bridge-id uint))
+    (default-to
+        { risk-score: u50, total-claims: u0, total-payouts: u0, last-updated: u0 }
+        (map-get? bridge-risk-ratings bridge-id)
+    )
+)
+
+;; Calculate premium for coverage amount
+(define-read-only (calculate-premium (bridge-id uint) (coverage-amount uint))
+    (let
+        (
+            (base-premium (var-get base-premium-bps))
+            (risk-rating (get-bridge-risk-rating bridge-id))
+            (risk-score (get risk-score risk-rating))
+            ;; Base premium + risk adjustment (risk-score / 100 adds 0-100% to base)
+            (risk-adjusted-premium (+ base-premium (/ (* base-premium risk-score) u100)))
+        )
+        ;; Calculate premium as percentage of coverage
+        (/ (* coverage-amount risk-adjusted-premium) u10000)
+    )
+)
+
+;; Get insurance pool stats
+(define-read-only (get-insurance-pool-stats)
+    {
+        pool-balance: (var-get insurance-pool-balance),
+        total-policies: (var-get insurance-counter),
+        total-claims: (var-get claim-counter),
+        base-premium-bps: (var-get base-premium-bps)
+    }
+)
+
+;; Check if user has active coverage for bridge
+(define-read-only (has-active-coverage (user principal) (bridge-id uint))
+    (let
+        (
+            (active-policies (get-user-active-policies user bridge-id))
+            (current-time stacks-block-time)
+        )
+        (> (len active-policies) u0)
+    )
 )
 
 ;; ========================================
@@ -1064,3 +1190,257 @@
         (ok true)
     )
 )
+;; ========================================
+;; Insurance Public Functions
+;; ========================================
+
+;; Purchase insurance coverage for bridge transaction
+(define-public (purchase-insurance (bridge-id uint) (coverage-amount uint) (duration-hours uint))
+    (let
+        (
+            (bridge (unwrap! (map-get? bridges bridge-id) ERR_BRIDGE_NOT_FOUND))
+            (user tx-sender)
+            (policy-id (+ (var-get insurance-counter) u1))
+            (premium (calculate-premium bridge-id coverage-amount))
+            (current-time stacks-block-time)
+            (expiry-time (+ current-time (* duration-hours u3600)))
+            (existing-policies (get-user-active-policies user bridge-id))
+        )
+        (asserts! (get active bridge) ERR_BRIDGE_NOT_FOUND)
+        (asserts! (> coverage-amount u0) ERR_INVALID_COVERAGE)
+        (asserts! (> duration-hours u0) ERR_INVALID_COVERAGE)
+        (asserts! (<= duration-hours u168) ERR_INVALID_COVERAGE) ;; Max 7 days
+
+        ;; Transfer premium to contract
+        (unwrap! (stx-transfer? premium user (var-get contract-principal)) ERR_INVALID_COVERAGE)
+
+        ;; Create insurance policy
+        (map-set insurance-policies
+            { user: user, policy-id: policy-id }
+            {
+                bridge-id: bridge-id,
+                coverage-amount: coverage-amount,
+                premium-paid: premium,
+                purchased-at: current-time,
+                expires-at: expiry-time,
+                active: true,
+                claimed: false
+            }
+        )
+
+        ;; Add to user's active policies
+        (map-set user-active-policies
+            { user: user, bridge-id: bridge-id }
+            (unwrap! (as-max-len? (append existing-policies policy-id) u10) ERR_INVALID_COVERAGE)
+        )
+
+        ;; Add premium to insurance pool
+        (var-set insurance-pool-balance (+ (var-get insurance-pool-balance) premium))
+        (var-set insurance-counter policy-id)
+
+        (print {
+            event: "insurance-purchased",
+            user: user,
+            policy-id: policy-id,
+            bridge-id: bridge-id,
+            coverage-amount: coverage-amount,
+            premium-paid: premium,
+            expires-at: expiry-time,
+            timestamp: current-time
+        })
+
+        (ok policy-id)
+    )
+)
+
+;; File insurance claim for failed bridge transaction
+(define-public (file-insurance-claim (policy-id uint) (claim-amount uint))
+    (let
+        (
+            (user tx-sender)
+            (policy (unwrap! (get-insurance-policy user policy-id) ERR_INSURANCE_NOT_FOUND))
+            (claim-id (+ (var-get claim-counter) u1))
+            (current-time stacks-block-time)
+            (bridge-id (get bridge-id policy))
+        )
+        (asserts! (get active policy) ERR_INSURANCE_NOT_FOUND)
+        (asserts! (not (get claimed policy)) ERR_CLAIM_ALREADY_PROCESSED)
+        (asserts! (>= (get expires-at policy) current-time) ERR_INSURANCE_NOT_FOUND)
+        (asserts! (<= claim-amount (get coverage-amount policy)) ERR_INVALID_COVERAGE)
+        (asserts! (> claim-amount u0) ERR_INVALID_COVERAGE)
+
+        ;; Create claim
+        (map-set insurance-claims claim-id
+            {
+                policy-id: policy-id,
+                user: user,
+                bridge-id: bridge-id,
+                claim-amount: claim-amount,
+                filed-at: current-time,
+                processed-at: u0,
+                approved: false,
+                processed: false,
+                payout-amount: u0
+            }
+        )
+
+        (var-set claim-counter claim-id)
+
+        (print {
+            event: "insurance-claim-filed",
+            claim-id: claim-id,
+            user: user,
+            policy-id: policy-id,
+            bridge-id: bridge-id,
+            claim-amount: claim-amount,
+            timestamp: current-time
+        })
+
+        (ok claim-id)
+    )
+)
+
+;; Process insurance claim (admin function)
+(define-public (process-insurance-claim (claim-id uint) (approved bool))
+    (let
+        (
+            (claim (unwrap! (get-insurance-claim claim-id) ERR_CLAIM_NOT_FOUND))
+            (policy (unwrap! (get-insurance-policy (get user claim) (get policy-id claim)) ERR_INSURANCE_NOT_FOUND))
+            (current-time stacks-block-time)
+            (payout (if approved (get claim-amount claim) u0))
+            (pool-balance (var-get insurance-pool-balance))
+            (bridge-id (get bridge-id claim))
+            (risk-rating (get-bridge-risk-rating bridge-id))
+        )
+        (asserts! (is-eq tx-sender CONTRACT_OWNER) ERR_NOT_AUTHORIZED)
+        (asserts! (not (get processed claim)) ERR_CLAIM_ALREADY_PROCESSED)
+        (asserts! (>= pool-balance payout) ERR_INSUFFICIENT_POOL)
+
+        ;; Update claim
+        (map-set insurance-claims claim-id
+            (merge claim {
+                processed: true,
+                approved: approved,
+                processed-at: current-time,
+                payout-amount: payout
+            })
+        )
+
+        ;; If approved, process payout
+        (if approved
+            (begin
+                ;; Transfer payout to user
+                (unwrap! (stx-transfer? payout (var-get contract-principal) (get user claim)) ERR_INSUFFICIENT_POOL)
+
+                ;; Update insurance pool balance
+                (var-set insurance-pool-balance (- pool-balance payout))
+
+                ;; Mark policy as claimed
+                (map-set insurance-policies
+                    { user: (get user claim), policy-id: (get policy-id claim) }
+                    (merge policy { claimed: true, active: false })
+                )
+
+                ;; Update bridge risk rating
+                (map-set bridge-risk-ratings bridge-id
+                    (merge risk-rating {
+                        total-claims: (+ (get total-claims risk-rating) u1),
+                        total-payouts: (+ (get total-payouts risk-rating) payout),
+                        last-updated: current-time
+                    })
+                )
+            )
+            true
+        )
+
+        (print {
+            event: "insurance-claim-processed",
+            claim-id: claim-id,
+            user: (get user claim),
+            policy-id: (get policy-id claim),
+            bridge-id: bridge-id,
+            approved: approved,
+            payout-amount: payout,
+            timestamp: current-time
+        })
+
+        (ok payout)
+    )
+)
+
+;; Update bridge risk score (admin function)
+(define-public (update-bridge-risk-score (bridge-id uint) (risk-score uint))
+    (let
+        (
+            (bridge (unwrap! (map-get? bridges bridge-id) ERR_BRIDGE_NOT_FOUND))
+            (current-rating (get-bridge-risk-rating bridge-id))
+        )
+        (asserts! (is-eq tx-sender CONTRACT_OWNER) ERR_NOT_AUTHORIZED)
+        (asserts! (<= risk-score u100) ERR_INVALID_COVERAGE)
+
+        (map-set bridge-risk-ratings bridge-id
+            (merge current-rating {
+                risk-score: risk-score,
+                last-updated: stacks-block-time
+            })
+        )
+
+        (print {
+            event: "bridge-risk-score-updated",
+            bridge-id: bridge-id,
+            risk-score: risk-score,
+            timestamp: stacks-block-time
+        })
+
+        (ok true)
+    )
+)
+
+;; Admin: Update insurance configuration
+(define-public (set-insurance-config (base-premium uint) (coverage-ratio uint))
+    (begin
+        (asserts! (is-eq tx-sender CONTRACT_OWNER) ERR_NOT_AUTHORIZED)
+        (asserts! (> base-premium u0) ERR_INVALID_COVERAGE)
+        (asserts! (<= base-premium u1000) ERR_INVALID_COVERAGE) ;; Max 10%
+        (asserts! (> coverage-ratio u0) ERR_INVALID_COVERAGE)
+
+        (var-set base-premium-bps base-premium)
+        (var-set coverage-to-premium-ratio coverage-ratio)
+
+        (print {
+            event: "insurance-config-updated",
+            base-premium-bps: base-premium,
+            coverage-ratio: coverage-ratio,
+            timestamp: stacks-block-time
+        })
+
+        (ok true)
+    )
+)
+
+;; Cancel expired policy (cleanup function)
+(define-public (cancel-expired-policy (user principal) (policy-id uint))
+    (let
+        (
+            (policy (unwrap! (get-insurance-policy user policy-id) ERR_INSURANCE_NOT_FOUND))
+            (current-time stacks-block-time)
+        )
+        (asserts! (< (get expires-at policy) current-time) ERR_INSURANCE_EXISTS)
+        (asserts! (get active policy) ERR_INSURANCE_NOT_FOUND)
+
+        (map-set insurance-policies
+            { user: user, policy-id: policy-id }
+            (merge policy { active: false })
+        )
+
+        (print {
+            event: "insurance-policy-expired",
+            user: user,
+            policy-id: policy-id,
+            timestamp: current-time
+        })
+
+        (ok true)
+    )
+)
+

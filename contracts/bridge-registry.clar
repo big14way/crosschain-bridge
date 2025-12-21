@@ -14,6 +14,10 @@
 (define-constant ERR_INVALID_PERFORMANCE (err u10005))
 (define-constant ERR_INSUFFICIENT_POINTS (err u10006))
 (define-constant ERR_INVALID_REDEMPTION (err u10007))
+(define-constant ERR_POOL_NOT_FOUND (err u10008))
+(define-constant ERR_INSUFFICIENT_LIQUIDITY (err u10009))
+(define-constant ERR_POOL_EXISTS (err u10010))
+(define-constant ERR_INVALID_DEPOSIT (err u10011))
 
 ;; Chain identifiers
 (define-constant CHAIN_STACKS u1)
@@ -122,6 +126,53 @@
 
 ;; Track total points redeemed per user
 (define-map user-points-redeemed principal uint)
+
+;; ========================================
+;; Liquidity Pool System
+;; ========================================
+
+(define-data-var pool-counter uint u0)
+(define-data-var contract-principal principal tx-sender)
+(define-data-var total-pool-liquidity uint u0)
+
+;; Liquidity pools for specific bridge routes
+(define-map liquidity-pools
+    { bridge-id: uint }
+    {
+        total-liquidity: uint,
+        total-shares: uint,
+        fee-bps: uint,
+        total-fees-collected: uint,
+        created-at: uint,
+        active: bool
+    }
+)
+
+;; User liquidity positions
+(define-map user-liquidity-positions
+    { user: principal, bridge-id: uint }
+    {
+        shares: uint,
+        deposited-amount: uint,
+        fees-earned: uint,
+        deposited-at: uint,
+        last-claim-at: uint
+    }
+)
+
+;; Track liquidity events
+(define-map liquidity-events
+    { pool-id: uint, event-id: uint }
+    {
+        event-type: (string-ascii 32),
+        user: principal,
+        amount: uint,
+        shares: uint,
+        timestamp: uint
+    }
+)
+
+(define-data-var liquidity-event-counter uint u0)
 
 ;; ========================================
 ;; Read-Only Functions
@@ -300,6 +351,92 @@
         total-redeemed: (get-user-points-redeemed user),
         available-discount-bps: (calculate-discount (get-user-points user))
     }
+)
+
+;; ========================================
+;; Liquidity Pool Read-Only Functions
+;; ========================================
+
+;; Get liquidity pool info
+(define-read-only (get-liquidity-pool (bridge-id uint))
+    (map-get? liquidity-pools { bridge-id: bridge-id })
+)
+
+;; Get user's liquidity position
+(define-read-only (get-user-position (user principal) (bridge-id uint))
+    (map-get? user-liquidity-positions { user: user, bridge-id: bridge-id })
+)
+
+;; Calculate user's share of pool (in basis points)
+(define-read-only (calculate-user-pool-share (user principal) (bridge-id uint))
+    (match (get-liquidity-pool bridge-id)
+        pool (match (get-user-position user bridge-id)
+            position (if (is-eq (get total-shares pool) u0)
+                u0
+                (/ (* (get shares position) u10000) (get total-shares pool)))
+            u0)
+        u0)
+)
+
+;; Calculate claimable fees for user
+(define-read-only (calculate-claimable-fees (user principal) (bridge-id uint))
+    (match (get-liquidity-pool bridge-id)
+        pool (match (get-user-position user bridge-id)
+            position (let
+                (
+                    (user-share-bps (calculate-user-pool-share user bridge-id))
+                    (total-fees (get total-fees-collected pool))
+                    (already-earned (get fees-earned position))
+                )
+                (if (is-eq user-share-bps u0)
+                    u0
+                    (- (/ (* total-fees user-share-bps) u10000) already-earned)))
+            u0)
+        u0)
+)
+
+;; Get pool statistics
+(define-read-only (get-pool-stats (bridge-id uint))
+    (match (get-liquidity-pool bridge-id)
+        pool {
+            total-liquidity: (get total-liquidity pool),
+            total-shares: (get total-shares pool),
+            fee-bps: (get fee-bps pool),
+            total-fees-collected: (get total-fees-collected pool),
+            active: (get active pool),
+            apr-estimate: u0  ;; Would calculate based on fee history
+        }
+        {
+            total-liquidity: u0,
+            total-shares: u0,
+            fee-bps: u0,
+            total-fees-collected: u0,
+            active: false,
+            apr-estimate: u0
+        })
+)
+
+;; Get user's full liquidity info
+(define-read-only (get-user-liquidity-info (user principal) (bridge-id uint))
+    (match (get-user-position user bridge-id)
+        position {
+            shares: (get shares position),
+            deposited-amount: (get deposited-amount position),
+            fees-earned: (get fees-earned position),
+            claimable-fees: (calculate-claimable-fees user bridge-id),
+            pool-share-bps: (calculate-user-pool-share user bridge-id),
+            deposited-at: (get deposited-at position),
+            last-claim-at: (get last-claim-at position)
+        }
+        {
+            shares: u0,
+            deposited-amount: u0,
+            fees-earned: u0,
+            claimable-fees: u0,
+            pool-share-bps: u0,
+            deposited-at: u0,
+            last-claim-at: u0
+        })
 )
 
 ;; ========================================
@@ -645,6 +782,282 @@
             points-per-tx: points-per-tx,
             points-to-discount: points-to-discount,
             max-discount: max-discount,
+            timestamp: stacks-block-time
+        })
+
+        (ok true)
+    )
+)
+
+;; ========================================
+;; Liquidity Pool Public Functions
+;; ========================================
+
+;; Create liquidity pool for a bridge
+(define-public (create-liquidity-pool (bridge-id uint) (fee-bps uint))
+    (let
+        (
+            (bridge (unwrap! (map-get? bridges bridge-id) ERR_BRIDGE_NOT_FOUND))
+            (pool-id (+ (var-get pool-counter) u1))
+        )
+        (asserts! (is-eq tx-sender CONTRACT_OWNER) ERR_NOT_AUTHORIZED)
+        (asserts! (is-none (get-liquidity-pool bridge-id)) ERR_POOL_EXISTS)
+        (asserts! (get active bridge) ERR_BRIDGE_NOT_FOUND)
+        (asserts! (<= fee-bps u10000) ERR_INVALID_DEPOSIT)
+
+        (map-set liquidity-pools
+            { bridge-id: bridge-id }
+            {
+                total-liquidity: u0,
+                total-shares: u0,
+                fee-bps: fee-bps,
+                total-fees-collected: u0,
+                created-at: stacks-block-time,
+                active: true
+            }
+        )
+
+        (var-set pool-counter pool-id)
+
+        (print {
+            event: "liquidity-pool-created",
+            bridge-id: bridge-id,
+            pool-id: pool-id,
+            fee-bps: fee-bps,
+            timestamp: stacks-block-time
+        })
+
+        (ok pool-id)
+    )
+)
+
+;; Deposit liquidity into a pool
+(define-public (deposit-liquidity (bridge-id uint) (amount uint))
+    (let
+        (
+            (pool (unwrap! (get-liquidity-pool bridge-id) ERR_POOL_NOT_FOUND))
+            (user tx-sender)
+            (existing-position (get-user-position user bridge-id))
+            (current-time stacks-block-time)
+            (event-id (var-get liquidity-event-counter))
+            (shares-to-mint (if (is-eq (get total-shares pool) u0)
+                amount  ;; First deposit: 1:1 shares
+                (/ (* amount (get total-shares pool)) (get total-liquidity pool))))
+        )
+        (asserts! (get active pool) ERR_POOL_NOT_FOUND)
+        (asserts! (> amount u0) ERR_INVALID_DEPOSIT)
+
+        ;; Transfer STX to contract
+        (unwrap! (stx-transfer? amount tx-sender (var-get contract-principal)) ERR_INVALID_DEPOSIT)
+
+        ;; Update pool
+        (map-set liquidity-pools
+            { bridge-id: bridge-id }
+            (merge pool {
+                total-liquidity: (+ (get total-liquidity pool) amount),
+                total-shares: (+ (get total-shares pool) shares-to-mint)
+            })
+        )
+
+        ;; Update or create user position
+        (match existing-position
+            position (map-set user-liquidity-positions
+                { user: user, bridge-id: bridge-id }
+                (merge position {
+                    shares: (+ (get shares position) shares-to-mint),
+                    deposited-amount: (+ (get deposited-amount position) amount)
+                }))
+            (map-set user-liquidity-positions
+                { user: user, bridge-id: bridge-id }
+                {
+                    shares: shares-to-mint,
+                    deposited-amount: amount,
+                    fees-earned: u0,
+                    deposited-at: current-time,
+                    last-claim-at: current-time
+                })
+        )
+
+        ;; Record event
+        (map-set liquidity-events
+            { pool-id: bridge-id, event-id: event-id }
+            {
+                event-type: "deposit",
+                user: user,
+                amount: amount,
+                shares: shares-to-mint,
+                timestamp: current-time
+            }
+        )
+
+        (var-set liquidity-event-counter (+ event-id u1))
+        (var-set total-pool-liquidity (+ (var-get total-pool-liquidity) amount))
+
+        (print {
+            event: "liquidity-deposited",
+            user: user,
+            bridge-id: bridge-id,
+            amount: amount,
+            shares-minted: shares-to-mint,
+            new-total-liquidity: (+ (get total-liquidity pool) amount),
+            timestamp: current-time
+        })
+
+        (ok shares-to-mint)
+    )
+)
+
+;; Withdraw liquidity from pool
+(define-public (withdraw-liquidity (bridge-id uint) (shares uint))
+    (let
+        (
+            (pool (unwrap! (get-liquidity-pool bridge-id) ERR_POOL_NOT_FOUND))
+            (user tx-sender)
+            (position (unwrap! (get-user-position user bridge-id) ERR_POOL_NOT_FOUND))
+            (current-time stacks-block-time)
+            (event-id (var-get liquidity-event-counter))
+            (withdrawal-amount (/ (* shares (get total-liquidity pool)) (get total-shares pool)))
+        )
+        (asserts! (>= (get shares position) shares) ERR_INSUFFICIENT_LIQUIDITY)
+        (asserts! (> shares u0) ERR_INVALID_DEPOSIT)
+        (asserts! (>= (get total-liquidity pool) withdrawal-amount) ERR_INSUFFICIENT_LIQUIDITY)
+
+        ;; Transfer STX back to user
+        (unwrap! (stx-transfer? withdrawal-amount (var-get contract-principal) user) ERR_INSUFFICIENT_LIQUIDITY)
+
+        ;; Update pool
+        (map-set liquidity-pools
+            { bridge-id: bridge-id }
+            (merge pool {
+                total-liquidity: (- (get total-liquidity pool) withdrawal-amount),
+                total-shares: (- (get total-shares pool) shares)
+            })
+        )
+
+        ;; Update user position
+        (map-set user-liquidity-positions
+            { user: user, bridge-id: bridge-id }
+            (merge position {
+                shares: (- (get shares position) shares),
+                deposited-amount: (if (> (get deposited-amount position) withdrawal-amount)
+                    (- (get deposited-amount position) withdrawal-amount)
+                    u0)
+            })
+        )
+
+        ;; Record event
+        (map-set liquidity-events
+            { pool-id: bridge-id, event-id: event-id }
+            {
+                event-type: "withdrawal",
+                user: user,
+                amount: withdrawal-amount,
+                shares: shares,
+                timestamp: current-time
+            }
+        )
+
+        (var-set liquidity-event-counter (+ event-id u1))
+        (var-set total-pool-liquidity (- (var-get total-pool-liquidity) withdrawal-amount))
+
+        (print {
+            event: "liquidity-withdrawn",
+            user: user,
+            bridge-id: bridge-id,
+            amount: withdrawal-amount,
+            shares-burned: shares,
+            new-total-liquidity: (- (get total-liquidity pool) withdrawal-amount),
+            timestamp: current-time
+        })
+
+        (ok withdrawal-amount)
+    )
+)
+
+;; Claim accumulated fees from liquidity provision
+(define-public (claim-liquidity-fees (bridge-id uint))
+    (let
+        (
+            (pool (unwrap! (get-liquidity-pool bridge-id) ERR_POOL_NOT_FOUND))
+            (user tx-sender)
+            (position (unwrap! (get-user-position user bridge-id) ERR_POOL_NOT_FOUND))
+            (claimable-fees (calculate-claimable-fees user bridge-id))
+            (current-time stacks-block-time)
+        )
+        (asserts! (> claimable-fees u0) ERR_INSUFFICIENT_LIQUIDITY)
+
+        ;; Transfer fees to user
+        (unwrap! (stx-transfer? claimable-fees (var-get contract-principal) user) ERR_INSUFFICIENT_LIQUIDITY)
+
+        ;; Update user position
+        (map-set user-liquidity-positions
+            { user: user, bridge-id: bridge-id }
+            (merge position {
+                fees-earned: (+ (get fees-earned position) claimable-fees),
+                last-claim-at: current-time
+            })
+        )
+
+        (print {
+            event: "liquidity-fees-claimed",
+            user: user,
+            bridge-id: bridge-id,
+            fees-claimed: claimable-fees,
+            total-fees-earned: (+ (get fees-earned position) claimable-fees),
+            timestamp: current-time
+        })
+
+        (ok claimable-fees)
+    )
+)
+
+;; Record bridge transaction fee (called when bridge is used)
+(define-public (record-bridge-fee (bridge-id uint) (fee-amount uint))
+    (let
+        (
+            (pool (unwrap! (get-liquidity-pool bridge-id) ERR_POOL_NOT_FOUND))
+        )
+        ;; In production, verify caller is authorized bridge contract
+        (asserts! (get active pool) ERR_POOL_NOT_FOUND)
+        (asserts! (> fee-amount u0) ERR_INVALID_DEPOSIT)
+
+        ;; Update pool with collected fees
+        (map-set liquidity-pools
+            { bridge-id: bridge-id }
+            (merge pool {
+                total-fees-collected: (+ (get total-fees-collected pool) fee-amount)
+            })
+        )
+
+        (print {
+            event: "bridge-fee-recorded",
+            bridge-id: bridge-id,
+            fee-amount: fee-amount,
+            total-fees-collected: (+ (get total-fees-collected pool) fee-amount),
+            timestamp: stacks-block-time
+        })
+
+        (ok true)
+    )
+)
+
+;; Admin: Set pool active status
+(define-public (set-pool-active (bridge-id uint) (active bool))
+    (let
+        (
+            (pool (unwrap! (get-liquidity-pool bridge-id) ERR_POOL_NOT_FOUND))
+        )
+        (asserts! (is-eq tx-sender CONTRACT_OWNER) ERR_NOT_AUTHORIZED)
+
+        (map-set liquidity-pools
+            { bridge-id: bridge-id }
+            (merge pool { active: active })
+        )
+
+        (print {
+            event: "pool-status-changed",
+            bridge-id: bridge-id,
+            active: active,
             timestamp: stacks-block-time
         })
 

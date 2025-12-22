@@ -1,0 +1,39 @@
+{
+  "chain": "stacks",
+  "uuid": "bridge-governance-v1",
+  "name": "Bridge Governance Events",
+  "version": 1,
+  "networks": {
+    "testnet": {
+      "start_block": 1,
+      "if_this": {
+        "scope": "print_event",
+        "contract_identifier": "ST1PQHQKV0RJXZFY1DGX8MNSNYVE3VGZJSRTPGZGM.bridge-governance",
+        "contains": "event"
+      },
+      "then_that": {
+        "http_post": {
+          "url": "http://localhost:3000/api/events/governance",
+          "authorization_header": "Bearer GOVERNANCE_API_KEY"
+        }
+      }
+    },
+    "mainnet": {
+      "start_block": 1,
+      "if_this": {
+        "scope": "print_event",
+        "contract_identifier": "SP000000000000000000002Q6VF78.bridge-governance",
+        "contains": "event"
+      },
+      "then_that": {
+        "http_post": {
+          "url": "https://api.bridge.com/events/governance",
+          "authorization_header": "Bearer GOVERNANCE_API_KEY"
+        }
+      }
+    }
+  },
+  "expire_after_occurrence": null,
+  "decode_clarity_values": true,
+  "enabled": true
+}

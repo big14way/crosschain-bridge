@@ -11,28 +11,28 @@ plan:
         - contract-publish:
             contract-name: bridge-governance
             expected-sender: ST1HTBVD3JG9C05J7HBJTHGR0GGW7KXW28M5JS8QE
-            cost: 24696080
+            cost: 256260
             path: contracts/bridge-governance.clar
             anchor-block-only: true
             clarity-version: 4
         - contract-publish:
             contract-name: bridge-registry
             expected-sender: ST1HTBVD3JG9C05J7HBJTHGR0GGW7KXW28M5JS8QE
-            cost: 25137004
+            cost: 468260
             path: contracts/bridge-registry.clar
             anchor-block-only: true
             clarity-version: 4
         - contract-publish:
             contract-name: intent-bridge
             expected-sender: ST1HTBVD3JG9C05J7HBJTHGR0GGW7KXW28M5JS8QE
-            cost: 24512726
+            cost: 169200
             path: contracts/intent-bridge.clar
             anchor-block-only: true
             clarity-version: 4
         - contract-publish:
             contract-name: intent-executor
             expected-sender: ST1HTBVD3JG9C05J7HBJTHGR0GGW7KXW28M5JS8QE
-            cost: 24355565
+            cost: 92650
             path: contracts/intent-executor.clar
             anchor-block-only: true
             clarity-version: 4
